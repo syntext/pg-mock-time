@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  postgres:
+    build: .
+    container_name: pg-mock-time
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      # LD_PRELOAD points to the interception library
+      LD_PRELOAD: /usr/lib/postgresql/17/lib/pg_mock_time_simple.so
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # - ./test_mock_time.sql:/docker-entrypoint-initdb.d/99-test.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

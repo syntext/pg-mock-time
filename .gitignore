@@ -1,0 +1,29 @@
+# Build artifacts
+*.o
+*.so
+*.bc
+*.a
+*.dylib
+pg_mock_time.so
+pg_mock_time_simple.so
+pg_mock_time_sql.so
+
+# PostgreSQL build files
+results/
+
+# Docker volumes
+postgres_data/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

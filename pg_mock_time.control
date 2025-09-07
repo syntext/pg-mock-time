@@ -1,0 +1,4 @@
+comment = 'Mock wall-clock time by interposing libc time functions with SQL controls'
+default_version = '1.0'
+relocatable = true
+module_pathname = '$libdir/pg_mock_time_sql'
