@@ -2,6 +2,10 @@
 
 A PostgreSQL extension that allows you to mock system time for testing time-dependent database operations. This extension uses `LD_PRELOAD` to intercept system time calls and provides SQL functions to control the mocked time.
 
+## Supported PostgreSQL Versions
+
+Requires PostgreSQL 14 or later.
+
 ## Features
 
 - **Fixed Time Mode**: Set a specific timestamp that all time functions will return
@@ -12,17 +16,59 @@ A PostgreSQL extension that allows you to mock system time for testing time-depe
 
 ## Quick Start
 
+### Choosing PostgreSQL Image
+
+You can specify any PostgreSQL Docker image using the `PG_IMAGE` environment variable:
+
+```bash
+# Use default (latest PostgreSQL)
+export PG_IMAGE=postgres:latest
+
+# Use PostgreSQL 16 
+export PG_IMAGE=postgres:16
+
+# Use PostgreSQL 15 with bookworm
+export PG_IMAGE=postgres:15-bookworm
+
+# Use specific patch version
+export PG_IMAGE=postgres:17.6
+
+# Tested OS bases: Debian 12 (bookworm), Debian 13 (trixie)
+```
+
+### Building for Different PostgreSQL Images
+
+```bash
+# Build with default image (postgres:latest)
+make docker-build
+
+# Build with PostgreSQL 16
+PG_IMAGE=postgres:16 make docker-build
+
+# Build with PostgreSQL 15 bookworm
+PG_IMAGE=postgres:15-bookworm make docker-build
+
+# Build with specific version
+PG_IMAGE=postgres:17.6 make docker-build
+
+# Test with different images
+PG_IMAGE=postgres:16 make test
+PG_IMAGE=postgres:17 make test
+```
+
 ### Including in Your Docker Image
 
 Add pg_mock_time to your existing PostgreSQL Docker image:
 
 ```dockerfile
-FROM postgres:17-bookworm AS builder
+# Use ARG to specify PostgreSQL image (defaults to postgres:latest)
+ARG PG_IMAGE=postgres:latest
+FROM ${PG_IMAGE} AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
-    postgresql-server-dev-17 \
+    postgresql-server-dev-all \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,11 +79,19 @@ RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
     && make -f Makefile install-all
 
 # Your production stage
-FROM postgres:17-bookworm
+FROM ${PG_IMAGE}
 
-# Copy the extension files from builder
-COPY --from=builder /usr/share/postgresql/17/extension/pg_mock_time* /usr/share/postgresql/17/extension/
-COPY --from=builder /usr/lib/postgresql/17/lib/pg_mock_time* /usr/lib/postgresql/17/lib/
+# Copy the extension files from builder using dynamic paths
+COPY --from=builder /usr/share/postgresql/*/extension/pg_mock_time* /tmp/pg_ext/
+COPY --from=builder /usr/lib/postgresql/*/lib/pg_mock_time* /tmp/pg_lib/
+
+# Install to correct paths for this PostgreSQL version
+RUN PG_LIB_DIR=$(pg_config --pkglibdir) && \
+    PG_EXT_DIR=$(pg_config --sharedir)/extension && \
+    mkdir -p "$PG_LIB_DIR" "$PG_EXT_DIR" && \
+    cp /tmp/pg_lib/* "$PG_LIB_DIR/" && \
+    cp /tmp/pg_ext/* "$PG_EXT_DIR/" && \
+    rm -rf /tmp/pg_lib /tmp/pg_ext
 
 # Your customizations...
 ```
@@ -78,7 +132,7 @@ make shell
 docker-compose up -d
 
 # Connect to the database
-docker exec -it pg-mock-time psql -U postgres
+docker exec -it ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres
 ```
 
 ## Usage
@@ -106,16 +160,38 @@ SELECT pg_mock_time_status();
 -- Returns: 'mock: disabled' or 'mock: enabled (fixed) ...' or 'mock: enabled (offset) ...'
 ```
 
-### Important: Using LD_PRELOAD for Time Interception
-
-The time mocking only affects processes that have the `LD_PRELOAD` environment variable set. For testing:
+Validate `now()` and `current_date` after a change (new transaction):
 
 ```bash
-# Run psql with time mocking enabled
-docker exec pg-mock-time bash -c 'LD_PRELOAD=/usr/lib/postgresql/17/lib/pg_mock_time_simple.so psql -U postgres'
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -c "SELECT set_mock_time('2025-01-01 12:00:00+00');"
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c "SELECT now() = '2025-01-01 12:00:00+00'::timestamptz, current_date = date '2025-01-01'"
+```
 
-# Or set it for specific queries
-docker exec pg-mock-time bash -c 'echo "SELECT now();" | LD_PRELOAD=/usr/lib/postgresql/17/lib/pg_mock_time_simple.so psql -U postgres -t'
+### Server Preload Required (LD_PRELOAD)
+
+Time mocking only affects processes that load the interposer via `LD_PRELOAD`. For PostgreSQL queries like `now()` and `current_date`, the process that must be preloaded is the PostgreSQL backend (the server), not the client (`psql`, app, etc.).
+
+This repository’s Dockerfile already sets `LD_PRELOAD` for the server via an entrypoint script, so you don’t need to set it for `psql`.
+
+Verify the preload is active:
+
+```bash
+# Get a backend PID from inside the container
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c 'SELECT pg_backend_pid()'
+
+# Check the process has LD_PRELOAD set
+PID=...                       # paste the PID from above
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} bash -lc "tr '\0' '\n' </proc/$PID/environ | grep LD_PRELOAD"
+
+# (optional) Confirm the shared object is mapped
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} bash -lc "grep pg_mock_time_simple /proc/$PID/maps"
+```
+
+If you are integrating into your own image without this repo’s Dockerfile, ensure the server process is started with:
+
+```bash
+export LD_PRELOAD=$(pg_config --pkglibdir)/pg_mock_time_simple.so
+exec docker-entrypoint.sh postgres
 ```
 
 ### Advanced Usage
@@ -142,11 +218,11 @@ When using pg_mock_time in your test suite:
 
 ```dockerfile
 # test.Dockerfile
-FROM postgres:17-bookworm AS builder
+FROM ${PG_IMAGE} AS builder
 
 RUN apt-get update && apt-get install -y \
     build-essential \
-    postgresql-server-dev-17 \
+    postgresql-server-dev-all \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -154,7 +230,7 @@ RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
     && cd /tmp/pg-mock-time \
     && make -f Makefile && make -f Makefile install-all
 
-FROM postgres:17-bookworm
+FROM ${PG_IMAGE}
 
 COPY --from=builder /usr/share/postgresql/17/extension/pg_mock_time* /usr/share/postgresql/17/extension/
 COPY --from=builder /usr/lib/postgresql/17/lib/pg_mock_time* /usr/lib/postgresql/17/lib/
@@ -167,10 +243,9 @@ Then in your test code:
 
 ```javascript
 // Example: Node.js test
+// Ensure your PostgreSQL service/image starts the server with LD_PRELOAD
+// (handled automatically by this repo's Dockerfile). No need to set it in Node.
 beforeEach(async () => {
-  // Set LD_PRELOAD for time mocking
-  process.env.LD_PRELOAD = '/usr/lib/postgresql/17/lib/pg_mock_time_simple.so';
-  
   // Reset time before each test
   await db.query("SELECT clear_mock_time()");
 });
@@ -192,20 +267,31 @@ test('subscription expires after 30 days', async () => {
 
 ```yaml
 # docker-compose.yml for development
-version: '3.8'
-
 services:
   postgres:
     build:
       context: .
       dockerfile: |
-        FROM postgres:17-bookworm AS builder
-        RUN apt-get update && apt-get install -y build-essential postgresql-server-dev-17 git
+        FROM ${PG_IMAGE} AS builder
+        RUN apt-get update && apt-get install -y build-essential postgresql-server-dev-all git
         RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
             && cd /tmp/pg-mock-time && make -f Makefile && make -f Makefile install-all
-        FROM postgres:17-bookworm
-        COPY --from=builder /usr/share/postgresql/17/extension/pg_mock_time* /usr/share/postgresql/17/extension/
-        COPY --from=builder /usr/lib/postgresql/17/lib/pg_mock_time* /usr/lib/postgresql/17/lib/
+        FROM ${PG_IMAGE}
+        COPY --from=builder /usr/share/postgresql/*/extension/pg_mock_time* /tmp/pg_ext/
+        COPY --from=builder /usr/lib/postgresql/*/lib/pg_mock_time* /tmp/pg_lib/
+        # Install to correct paths for this PostgreSQL version
+        RUN PG_LIB_DIR=$(pg_config --pkglibdir) && PG_EXT_DIR=$(pg_config --sharedir)/extension && \\
+            mkdir -p \"$PG_LIB_DIR\" \"$PG_EXT_DIR\" && \\
+            cp /tmp/pg_lib/* \"$PG_LIB_DIR/\" && cp /tmp/pg_ext/* \"$PG_EXT_DIR/\" && \\
+            rm -rf /tmp/pg_lib /tmp/pg_ext
+        # Ensure the PostgreSQL server is preloaded with the interposer
+        RUN echo '#!/bin/bash' > /usr/local/bin/pg-mock-time-entrypoint.sh && \\
+            echo 'export LD_PRELOAD=$(pg_config --pkglibdir)/pg_mock_time_simple.so' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \\
+            echo 'echo "Setting LD_PRELOAD to: $LD_PRELOAD"' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \\
+            echo 'exec "$@"' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \\
+            chmod +x /usr/local/bin/pg-mock-time-entrypoint.sh
+        ENTRYPOINT ["/usr/local/bin/pg-mock-time-entrypoint.sh"]
+        CMD ["docker-entrypoint.sh", "postgres"]
     environment:
       POSTGRES_DB: myapp_dev
       POSTGRES_USER: developer
@@ -259,7 +345,7 @@ The components communicate through a configuration file at `/tmp/pg_mock_time.co
 - **pg_mock_time_simple.c**: Time interception library using LD_PRELOAD
 - **pg_mock_time.control**: PostgreSQL extension control file
 - **pg_mock_time--1.0.sql**: SQL function definitions and helpers
-- **Dockerfile**: Multi-stage build for PostgreSQL 17
+- **Dockerfile**: Multi-stage build for any PostgreSQL version
 - **docker-compose.yml**: Container orchestration configuration
 
 ## Testing
@@ -333,22 +419,71 @@ Demonstrates testing subscription expiry logic at different time points.
 
 ## Compatibility
 
-- **PostgreSQL**: Version 17 tested
-- **Operating System**: Linux Debian/Ubuntu tested
-- **Architecture**: Supports both ARM64 (Apple Silicon) and x86_64 (tested)
+- **PostgreSQL**: Versions 14 and later
+- **Operating System**: Debian 12/13 tested; other OS/platforms not tested
+- **Compiler/Toolchain**: Built with GCC provided by Debian 12/13 base images; other toolchains not tested
 
 ## Troubleshooting
 
+### Collation version mismatch warnings
+
+Symptoms:
+- WARNING: database "postgres" has a collation version mismatch
+- DETAIL: The database was created using collation version 2.36, but the operating system provides version 2.41.
+
+Why this happens:
+- PostgreSQL stores the OS collation library version (glibc/ICU) at initdb time. If you later start the same data directory on an image with a newer/different collation library, PostgreSQL warns because text sort order may differ.
+
+Solid solutions:
+- Avoid reusing data volumes across OS variants or major versions. This repo now derives a unique Compose project per `PG_IMAGE` tag, isolating volumes for each tag (e.g., `postgres:15-bookworm`, `postgres:17.4`, etc.).
+- If you intentionally keep the data and just want to align collations:
+  - PostgreSQL 16+: `make refresh-collations` (runs `ALTER DATABASE ... REFRESH COLLATION VERSION;` then `REINDEX DATABASE`).
+  - PostgreSQL 14–15: `make refresh-collations` (refreshes each mismatched collation and reindexes the database).
+
+If you don’t care about the data (dev/test):
+- `make clean` to recreate the data volume under the current image’s collation library.
+
+Prevention tips:
+- Pin image tags (e.g., `postgres:15-bookworm`, `postgres:17.4-bookworm`) when you want consistent OS/glibc.
+- Switch tags with separate volumes (already handled by the per-tag Compose project in Makefiles).
+
 ### Time mocking not working
 
-Ensure `LD_PRELOAD` is set for your client process:
+Ensure the PostgreSQL server (not the client) is started with `LD_PRELOAD`:
 
 ```bash
-# Check if set in container environment
-docker exec pg-mock-time printenv | grep LD_PRELOAD
+# Check environment on a backend process
+PID=$(docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c 'SELECT pg_backend_pid()')
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} bash -lc "tr '\0' '\n' </proc/$PID/environ | grep LD_PRELOAD"
 
-# For time mocking to work, run clients with LD_PRELOAD
-docker exec pg-mock-time bash -c 'LD_PRELOAD=/usr/lib/postgresql/17/lib/pg_mock_time_simple.so psql -U postgres'
+# Verify the shared object exists at runtime
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} bash -lc 'ls -l $(pg_config --pkglibdir)/pg_mock_time_simple.so'
+
+# If not set, add an entrypoint that exports LD_PRELOAD before starting postgres
+```
+
+Also remember the semantics of `now()`:
+- `now()` is fixed at the start of the current transaction.
+- Use a new statement/transaction after changing the mock to observe the effect, or use `clock_timestamp()` to see immediate changes within the same transaction.
+
+Example checks:
+
+```bash
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -c "SELECT set_mock_time('2025-01-01 12:00:00+00');"
+# New transaction
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c "SELECT now() = '2025-01-01 12:00:00+00'::timestamptz"  # t
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c "SELECT current_date = date '2025-01-01'"          # t
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -c "SELECT clear_mock_time();"
+```
+
+For offsets:
+
+```bash
+base=$(docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c "SELECT extract(epoch FROM now())")
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -c "SELECT set_mock_time_offset(interval '2 hours');"
+delta=$(docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -At -c "SELECT extract(epoch FROM now()) - $base")
+echo $delta  # ~7200
+docker exec ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres -c "SELECT clear_mock_time();"
 ```
 
 ### Extension not found

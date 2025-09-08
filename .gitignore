@@ -17,6 +17,8 @@ postgres_data/
 # IDE files
 .vscode/
 .idea/
+.claude/
+.codex/
 *.swp
 *.swo
 *~
@@ -27,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Environment files
+.env

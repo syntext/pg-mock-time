@@ -1,3 +1,18 @@
+# PostgreSQL image support (any PostgreSQL Docker image)
+PG_IMAGE ?= postgres:latest
+PG_CONTAINER_NAME ?= pg-mock-time
+
+# Extract major version (e.g., 17 from postgres:17.4)
+PG_MAJOR := $(shell echo "$(PG_IMAGE)" | sed -nE 's/.*:([0-9]+).*/\1/p')
+ifeq ($(PG_MAJOR),)
+  PG_MAJOR := default
+endif
+
+# Extract full tag (portable, no awk ternary)
+# If PG_IMAGE has a tag (contains ':'), use the part after ':'; else 'latest'
+PG_TAG := $(shell sh -c 'img="$(PG_IMAGE)"; tag=$$(printf "%s" "$$img" | sed -n "s/^[^:]*://p"); if [ -n "$$tag" ]; then printf "%s\n" "$$tag"; else printf "%s\n" latest; fi')
+PG_TAGSAFE := $(shell sh -c "echo '$(PG_TAG)' | tr -c 'A-Za-z0-9._-' '-' | sed 's/-\{2,\}/-/g'")
+
 EXTENSION = pg_mock_time
 MODULE_big = pg_mock_time_sql
 OBJS = pg_mock_time_sql.o
@@ -36,25 +51,31 @@ test-docker: docker-up
 	@echo "Testing in Docker container..."
 	@./test_extension.sh
 
+## Detect docker compose command (supports both v1 and v2)
+DOCKER_COMPOSE := $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo docker compose)
+
+# Use a per-tag compose project name to avoid cross-version/OS volume reuse
+COMPOSE_PROJECT_NAME := $(PG_CONTAINER_NAME)
+
 # Docker management targets
 docker-build:
-	docker-compose build
+	PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) PG_CONTAINER_NAME=$(PG_CONTAINER_NAME) PG_PORT=$(PG_PORT) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) build
 
 docker-up: docker-build
-	docker-compose up -d
-	@echo "Waiting for PostgreSQL to be ready..."
+	PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) PG_CONTAINER_NAME=$(PG_CONTAINER_NAME) PG_PORT=$(PG_PORT) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) up -d
+	@echo "Waiting for PostgreSQL ($(PG_IMAGE)) to be ready..."
 	@for i in $$(seq 1 30); do \
-		docker exec pg-mock-time pg_isready -U postgres >/dev/null 2>&1 && break || sleep 1; \
+		docker exec $(PG_CONTAINER_NAME) pg_isready -U postgres >/dev/null 2>&1 && break || sleep 1; \
 	done
 
 docker-down:
-	docker-compose down -v
+	PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) PG_CONTAINER_NAME=$(PG_CONTAINER_NAME) PG_PORT=$(PG_PORT) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) down -v
 
 docker-restart: docker-down docker-up
 
 # Clean targets
 clean-docker:
-	docker-compose down -v
+	$(DOCKER_COMPOSE) down -v
 	docker rmi pg-mock-time-postgres || true
 
 clean-all: clean clean-docker
@@ -62,13 +83,13 @@ clean-all: clean clean-docker
 
 # Development helpers
 shell:
-	docker exec -it pg-mock-time psql -U postgres
+	docker exec -it $(PG_CONTAINER_NAME) psql -U postgres
 
 bash:
-	docker exec -it pg-mock-time bash
+	docker exec -it $(PG_CONTAINER_NAME) bash
 
 logs:
-	docker logs pg-mock-time
+	docker logs $(PG_CONTAINER_NAME)
 
 # Installation test
 install-test: install-all

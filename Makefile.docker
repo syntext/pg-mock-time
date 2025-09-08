@@ -1,7 +1,7 @@
 # Docker-based Makefile for pg_mock_time extension
 # This is the main Makefile to use for development and testing
 
-.PHONY: all build test clean shell logs help
+.PHONY: all build test clean shell logs help refresh-collations
 
 # Default target
 all: build
@@ -19,12 +19,37 @@ help:
 	@echo "  make logs        - Show container logs"
 	@echo "  make clean       - Clean up containers and images"
 	@echo "  make status      - Check extension status"
+	@echo "  make refresh-collations - Refresh DB collations and reindex"
 	@echo ""
+
+## Detect docker compose command (supports both v1 and v2)
+DOCKER_COMPOSE := $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo docker compose)
+
+PG_IMAGE ?= postgres:latest
+PG_CONTAINER_NAME ?= pg-mock-time
+
+# Extract major version (e.g., 17 from postgres:17.4)
+PG_MAJOR := $(shell echo "$(PG_IMAGE)" | sed -nE 's/.*:([0-9]+).*/\1/p')
+ifeq ($(PG_MAJOR),)
+  PG_MAJOR := default
+endif
+
+# Extract full tag (portable, no awk ternary)
+# If PG_IMAGE has a tag (contains ':'), use the part after ':'; else 'latest'
+PG_TAG := $(shell sh -c 'img="$(PG_IMAGE)"; tag=$$(printf "%s" "$$img" | sed -n "s/^[^:]*://p"); if [ -n "$$tag" ]; then printf "%s\n" "$$tag"; else printf "%s\n" latest; fi')
+# Sanitize tag for use in names
+PG_TAGSAFE := $(shell sh -c "echo '$(PG_TAG)' | tr -c 'A-Za-z0-9._-' '-' | sed 's/-\{2,\}/-/g'")
+
+## Detect docker compose command (supports both v1 and v2)
+DOCKER_COMPOSE := $(shell command -v docker-compose >/dev/null 2>&1 && echo docker-compose || echo docker compose)
+
+# Use a per-tag compose project name to avoid cross-version/OS volume reuse
+COMPOSE_PROJECT_NAME := $(PG_CONTAINER_NAME)
 
 # Build the Docker image
 build:
 	@echo "Building Docker image with pg_mock_time extension..."
-	@docker-compose build
+	@PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) PG_CONTAINER_NAME=$(PG_CONTAINER_NAME) PG_PORT=$(PG_PORT) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) build
 
 # Run tests
 test: up
@@ -34,46 +59,48 @@ test: up
 # Quick test without full suite
 quick-test: up
 	@echo "Running quick test..."
-	@docker exec pg-mock-time psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_mock_time; SELECT pg_mock_time_status();"
+	@docker exec $(PG_CONTAINER_NAME) psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_mock_time; SELECT pg_mock_time_status();"
 
 # Container management
+
 up: build
 	@echo "Starting PostgreSQL container..."
-	@docker-compose up -d
+	@docker rm -f $(PG_CONTAINER_NAME) >/dev/null 2>&1 || true
+	@PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) PG_CONTAINER_NAME=$(PG_CONTAINER_NAME) PG_PORT=$(PG_PORT) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) up -d
 	@echo "Waiting for PostgreSQL to be ready..."
 	@for i in $$(seq 1 30); do \
-		docker exec pg-mock-time pg_isready -U postgres >/dev/null 2>&1 && echo "PostgreSQL is ready!" && break || \
+		docker exec $(PG_CONTAINER_NAME) pg_isready -U postgres >/dev/null 2>&1 && echo "PostgreSQL is ready!" && break || \
 		([ $$i -eq 30 ] && echo "PostgreSQL failed to start" && exit 1) || \
-		(echo -n "." && sleep 1); \
+		(sleep 1); \
 	done
 
 down:
 	@echo "Stopping PostgreSQL container..."
-	@docker-compose down
+	@PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) PG_CONTAINER_NAME=$(PG_CONTAINER_NAME) PG_PORT=$(PG_PORT) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) down
 
 restart: down up
 
 # Development helpers
 shell:
-	@docker exec -it pg-mock-time psql -U postgres
+	@docker exec -it $(PG_CONTAINER_NAME) psql -U postgres
 
 bash:
-	@docker exec -it pg-mock-time bash
+	@docker exec -it $(PG_CONTAINER_NAME) bash
 
 logs:
-	@docker logs pg-mock-time --tail 50
+	@docker logs $(PG_CONTAINER_NAME) --tail 50
 
 logs-f:
-	@docker logs -f pg-mock-time
+	@docker logs -f $(PG_CONTAINER_NAME)
 
 # Check extension status
 status:
-	@docker exec pg-mock-time psql -U postgres -t -c "SELECT pg_mock_time_status();" 2>/dev/null || echo "Extension not installed or container not running"
+	@docker exec $(PG_CONTAINER_NAME) psql -U postgres -t -c "SELECT pg_mock_time_status();" 2>/dev/null || echo "Extension not installed or container not running"
 
 # Clean up
 clean:
 	@echo "Cleaning up containers and volumes..."
-	@docker-compose down -v
+	@PG_IMAGE=$(PG_IMAGE) PG_MAJOR=$(PG_MAJOR) COMPOSE_PROJECT_NAME=$(COMPOSE_PROJECT_NAME) $(DOCKER_COMPOSE) down -v
 
 clean-all: clean
 	@echo "Removing Docker image..."
@@ -82,3 +109,7 @@ clean-all: clean
 # Demo the extension
 demo: up
 	@./demo.sh
+
+# Refresh collations to resolve OS collation version mismatch without nuking data
+refresh-collations: up
+	@./refresh_collations.sh

@@ -1,17 +1,17 @@
-version: '3.8'
-
 services:
   postgres:
-    build: .
-    container_name: pg-mock-time
+    build: 
+      context: .
+      args:
+        PG_IMAGE: ${PG_IMAGE:-postgres:latest}
+    container_name: ${PG_CONTAINER_NAME:-pg-mock-time}
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
       POSTGRES_DB: postgres
-      # LD_PRELOAD points to the interception library
-      LD_PRELOAD: /usr/lib/postgresql/17/lib/pg_mock_time_simple.so
+      # Server LD_PRELOAD is handled by the image entrypoint (see Dockerfile)
     ports:
-      - "5432:5432"
+      - "${PG_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # - ./test_mock_time.sql:/docker-entrypoint-initdb.d/99-test.sql:ro

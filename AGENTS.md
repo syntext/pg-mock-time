@@ -13,12 +13,34 @@
 - Primary workflow uses Docker (recommended):
   - `make build` – build Docker image with the extension
   - `make up` / `make down` / `make restart` – manage Postgres container
-  - `make test` – run the integration test suite (8 checks)
+  - `make test` – run the integration test suite (10 checks)
+  - `make quick-test` – lightweight sanity check (create extension + status)
+  - `make status` – print `pg_mock_time_status()` if available
+  - `make logs` / `make logs-f` – show or follow container logs
   - `make demo` – interactive demonstration
-  - `make shell` / `make bash` / `make logs` – connect and inspect
+  - `make refresh-collations` – refresh DB collations and reindex
+  - `make clean` / `make clean-all` – remove containers/volumes and image
+  - `make shell` / `make bash` – connect to the running container
+  - `make help` – list available Docker targets
 - Local (no Docker) targets are in `Makefile`:
   - `make -f Makefile install-all` – install extension and interposer locally
   - `make -f Makefile test-local` – run tests against a local Postgres
+
+### Postgres Version Matrix (Docker)
+- Select the base Postgres image with `PG_IMAGE` (default `postgres:latest`).
+- Verified images: `postgres:16`, `postgres:17`.
+- Example runs (clean between targets):
+  - `PG_IMAGE=postgres:16 make clean build test`
+  - `PG_IMAGE=postgres:17 make clean build test`
+
+### Local (no Docker) prerequisites
+- Requires a host PostgreSQL toolchain and headers (`pg_config`,
+  `postgresql-server-dev-<major>`). If these are not present, prefer Docker
+  targets via the default `GNUmakefile` which includes `Makefile.docker`.
+
+### Script permissions
+- Ensure repo shell scripts are executable when adding new files. In particular,
+  `refresh_collations.sh` must be executable for `make refresh-collations` to work.
 
 ## Coding Style & Naming Conventions
 - C (extension and interposer):

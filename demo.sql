@@ -50,7 +50,7 @@ SELECT now() AS back_to_real_time;
 \echo '==================================='
 \echo ''
 \echo 'To see time mocking in action, run a client with LD_PRELOAD set:'
-\echo '  docker exec -e LD_PRELOAD=/usr/lib/postgresql/17/lib/pg_mock_time_simple.so pg-mock-time psql -U postgres'
+\echo '  docker exec -e LD_PRELOAD=$(docker exec ${PG_CONTAINER_NAME:-pg-mock-time} pg_config --pkglibdir)/pg_mock_time_simple.so ${PG_CONTAINER_NAME:-pg-mock-time} psql -U postgres'
 \echo ''
 \echo 'Or test with a simple time-checking query after setting mock time:'
 \echo '  SELECT set_mock_time(''2025-01-01 00:00:00+00'');'

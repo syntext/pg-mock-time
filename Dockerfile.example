@@ -1,12 +1,13 @@
 # Example Dockerfile showing how to include pg_mock_time extension
 # in your own PostgreSQL Docker image
 
-FROM postgres:17-bookworm AS builder
+ARG PG_IMAGE=postgres:latest
+FROM ${PG_IMAGE} AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
-    postgresql-server-dev-17 \
+    postgresql-server-dev-all \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,18 +17,38 @@ RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
     && make -f Makefile \
     && make -f Makefile install-all
 
-# Final stage - your production image
-FROM postgres:17-bookworm
+# Final stage
+FROM ${PG_IMAGE}
 
-# Copy the extension files from builder
-COPY --from=builder /usr/share/postgresql/17/extension/pg_mock_time* /usr/share/postgresql/17/extension/
-COPY --from=builder /usr/lib/postgresql/17/lib/pg_mock_time* /usr/lib/postgresql/17/lib/
+# Copy built extension from builder stage using runtime paths
+# Since the builder might be using different paths, we copy dynamically
+RUN mkdir -p /tmp/pg_lib /tmp/pg_ext
 
-# Optional: Set LD_PRELOAD if you want time mocking available by default
-# ENV LD_PRELOAD=/usr/lib/postgresql/17/lib/pg_mock_time_simple.so
+COPY --from=builder /usr/lib/postgresql/*/lib/pg_mock_time* /tmp/pg_lib/
+COPY --from=builder /usr/share/postgresql/*/extension/pg_mock_time* /tmp/pg_ext/
+COPY --from=builder /tmp/pg-mock-time/install_extension.sh /docker-entrypoint-initdb.d/
 
-# Your other customizations here...
-# COPY your_init.sql /docker-entrypoint-initdb.d/
-# ENV POSTGRES_DB=mydb
-# ENV POSTGRES_USER=myuser
-# ENV POSTGRES_PASSWORD=mypassword
+# Install the extension files to the correct runtime paths
+RUN PG_LIB_DIR=$(pg_config --pkglibdir) && \
+    PG_EXT_DIR=$(pg_config --sharedir)/extension && \
+    echo "Installing to PostgreSQL lib directory: $PG_LIB_DIR" && \
+    echo "Installing to PostgreSQL extension directory: $PG_EXT_DIR" && \
+    mkdir -p "$PG_LIB_DIR" && \
+    mkdir -p "$PG_EXT_DIR" && \
+    cp /tmp/pg_lib/* "$PG_LIB_DIR/" && \
+    cp /tmp/pg_ext/* "$PG_EXT_DIR/" && \
+    rm -rf /tmp/pg_lib /tmp/pg_ext && \
+    ls -la "$PG_LIB_DIR"/pg_mock_time* && \
+    ls -la "$PG_EXT_DIR"/pg_mock_time*
+
+# Create an entrypoint script that sets LD_PRELOAD dynamically
+RUN echo '#!/bin/bash' > /usr/local/bin/pg-mock-time-entrypoint.sh && \
+    echo 'export LD_PRELOAD=$(pg_config --pkglibdir)/pg_mock_time_simple.so' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \
+    echo 'echo "Setting LD_PRELOAD to: $LD_PRELOAD"' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \
+    echo 'exec "$@"' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \
+    chmod +x /usr/local/bin/pg-mock-time-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/pg-mock-time-entrypoint.sh"]
+CMD ["docker-entrypoint.sh", "postgres"]
+
+WORKDIR /
