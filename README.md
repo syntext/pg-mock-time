@@ -263,6 +263,33 @@ test('subscription expires after 30 days', async () => {
 });
 ```
 
+### Testcontainers
+
+- Use `Dockerfile.example` as a base to produce an image that works with Testcontainers out of the box.
+- The image:
+  - Installs the extension files for the current Postgres version at build time.
+  - Sets `LD_PRELOAD=/usr/local/lib/pg_mock_time_simple.so` via `ENV` (safe if no config file is present).
+  - Keeps the official `docker-entrypoint.sh` and `CMD` (no custom entrypoint).
+  - Honors `POSTGRES_USER`, `POSTGRES_DB`, and `POSTGRES_PASSWORD` in initialization to `CREATE EXTENSION`.
+
+Example (Java):
+
+```java
+PostgreSQLContainer<?> pg = new PostgreSQLContainer<>(
+    DockerImageName.parse("your-registry/pg-mock-time:testcontainers")
+);
+pg.start();
+
+try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
+    try (Statement s = c.createStatement()) {
+        s.execute("SELECT pg_mock_time_status()");
+        s.execute("SELECT set_mock_time('2025-01-01 12:00:00+00')");
+    }
+}
+```
+
+To disable mocking in a specific test, override env: `withEnv("LD_PRELOAD", "")`.
+
 ### For Development Environments
 
 ```yaml
