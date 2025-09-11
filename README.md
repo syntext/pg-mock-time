@@ -61,8 +61,8 @@ PG_IMAGE=postgres:17 make test
 Add pg_mock_time to your existing PostgreSQL Docker image:
 
 ```dockerfile
-# Use ARG to specify PostgreSQL image (defaults to postgres:latest)
-ARG PG_IMAGE=postgres:latest
+# Use ARG to specify PostgreSQL image
+ARG PG_IMAGE=postgres:17.6
 FROM ${PG_IMAGE} AS builder
 
 # Install build dependencies
@@ -72,28 +72,41 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone and build the extension from GitHub
+# Clone and build the extension
 RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
     && cd /tmp/pg-mock-time \
     && make -f Makefile \
     && make -f Makefile install-all
 
-# Your production stage
+# Final stage
 FROM ${PG_IMAGE}
 
-# Copy the extension files from builder using dynamic paths
-COPY --from=builder /usr/share/postgresql/*/extension/pg_mock_time* /tmp/pg_ext/
+# Stage built artifacts and install to runtime paths without relying on pg_config
+RUN mkdir -p /tmp/pg_lib /tmp/pg_ext
+
 COPY --from=builder /usr/lib/postgresql/*/lib/pg_mock_time* /tmp/pg_lib/
+COPY --from=builder /usr/share/postgresql/*/extension/pg_mock_time* /tmp/pg_ext/
 
-# Install to correct paths for this PostgreSQL version
-RUN PG_LIB_DIR=$(pg_config --pkglibdir) && \
-    PG_EXT_DIR=$(pg_config --sharedir)/extension && \
-    mkdir -p "$PG_LIB_DIR" "$PG_EXT_DIR" && \
-    cp /tmp/pg_lib/* "$PG_LIB_DIR/" && \
-    cp /tmp/pg_ext/* "$PG_EXT_DIR/" && \
-    rm -rf /tmp/pg_lib /tmp/pg_ext
+# Create init SQL to install the extension during initdb
+RUN echo "CREATE EXTENSION IF NOT EXISTS pg_mock_time;" > /docker-entrypoint-initdb.d/01-pg-mock-time.sql
 
-# Your customizations...
+# Locate target directories dynamically and install
+RUN set -eux; \
+    libdir=$(find /usr/lib/postgresql -maxdepth 2 -type d -name lib | head -n1); \
+    extdir=$(find /usr/share/postgresql -maxdepth 2 -type d -name extension | head -n1); \
+    test -n "$libdir" && test -n "$extdir"; \
+    cp /tmp/pg_lib/* "$libdir/"; \
+    cp /tmp/pg_ext/* "$extdir/"; \
+    # Provide a stable path for LD_PRELOAD
+    cp "$libdir/pg_mock_time_simple.so" /usr/local/lib/pg_mock_time_simple.so; \
+    rm -rf /tmp/pg_lib /tmp/pg_ext; \
+    ls -la "$libdir"/pg_mock_time*; \
+    ls -la "$extdir"/pg_mock_time*
+
+# Set LD_PRELOAD for the postgres process by default
+ENV LD_PRELOAD=/usr/local/lib/pg_mock_time_simple.so
+
+WORKDIR /
 ```
 
 Then in your database initialization:
@@ -210,60 +223,8 @@ SELECT advance_mock_time('30 minutes'::interval);
 SELECT reset_mock_time(); -- Same as clear_mock_time()
 ```
 
-## Integration Patterns
 
-### For Testing Frameworks
-
-When using pg_mock_time in your test suite:
-
-```dockerfile
-# test.Dockerfile
-FROM ${PG_IMAGE} AS builder
-
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    postgresql-server-dev-all \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
-    && cd /tmp/pg-mock-time \
-    && make -f Makefile && make -f Makefile install-all
-
-FROM ${PG_IMAGE}
-
-COPY --from=builder /usr/share/postgresql/17/extension/pg_mock_time* /usr/share/postgresql/17/extension/
-COPY --from=builder /usr/lib/postgresql/17/lib/pg_mock_time* /usr/lib/postgresql/17/lib/
-
-# Create extension on startup
-RUN echo "CREATE EXTENSION IF NOT EXISTS pg_mock_time;" > /docker-entrypoint-initdb.d/01-pg-mock-time.sql
-```
-
-Then in your test code:
-
-```javascript
-// Example: Node.js test
-// Ensure your PostgreSQL service/image starts the server with LD_PRELOAD
-// (handled automatically by this repo's Dockerfile). No need to set it in Node.
-beforeEach(async () => {
-  // Reset time before each test
-  await db.query("SELECT clear_mock_time()");
-});
-
-test('subscription expires after 30 days', async () => {
-  // Create subscription
-  await db.query("INSERT INTO subscriptions (expires_at) VALUES (NOW() + INTERVAL '30 days')");
-  
-  // Fast-forward 31 days
-  await db.query("SELECT set_mock_time_offset(INTERVAL '31 days')");
-  
-  // Check expiry
-  const expired = await db.query("SELECT * FROM subscriptions WHERE expires_at < NOW()");
-  expect(expired.rows).toHaveLength(1);
-});
-```
-
-### Testcontainers
+## Testcontainers
 
 - Use `Dockerfile.example` as a base to produce an image that works with Testcontainers out of the box.
 - The image:
@@ -289,43 +250,6 @@ try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), pg.getUsername(
 ```
 
 To disable mocking in a specific test, override env: `withEnv("LD_PRELOAD", "")`.
-
-### For Development Environments
-
-```yaml
-# docker-compose.yml for development
-services:
-  postgres:
-    build:
-      context: .
-      dockerfile: |
-        FROM ${PG_IMAGE} AS builder
-        RUN apt-get update && apt-get install -y build-essential postgresql-server-dev-all git
-        RUN git clone https://github.com/syntext/pg-mock-time.git /tmp/pg-mock-time \
-            && cd /tmp/pg-mock-time && make -f Makefile && make -f Makefile install-all
-        FROM ${PG_IMAGE}
-        COPY --from=builder /usr/share/postgresql/*/extension/pg_mock_time* /tmp/pg_ext/
-        COPY --from=builder /usr/lib/postgresql/*/lib/pg_mock_time* /tmp/pg_lib/
-        # Install to correct paths for this PostgreSQL version
-        RUN PG_LIB_DIR=$(pg_config --pkglibdir) && PG_EXT_DIR=$(pg_config --sharedir)/extension && \\
-            mkdir -p \"$PG_LIB_DIR\" \"$PG_EXT_DIR\" && \\
-            cp /tmp/pg_lib/* \"$PG_LIB_DIR/\" && cp /tmp/pg_ext/* \"$PG_EXT_DIR/\" && \\
-            rm -rf /tmp/pg_lib /tmp/pg_ext
-        # Ensure the PostgreSQL server is preloaded with the interposer
-        RUN echo '#!/bin/bash' > /usr/local/bin/pg-mock-time-entrypoint.sh && \\
-            echo 'export LD_PRELOAD=$(pg_config --pkglibdir)/pg_mock_time_simple.so' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \\
-            echo 'echo "Setting LD_PRELOAD to: $LD_PRELOAD"' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \\
-            echo 'exec "$@"' >> /usr/local/bin/pg-mock-time-entrypoint.sh && \\
-            chmod +x /usr/local/bin/pg-mock-time-entrypoint.sh
-        ENTRYPOINT ["/usr/local/bin/pg-mock-time-entrypoint.sh"]
-        CMD ["docker-entrypoint.sh", "postgres"]
-    environment:
-      POSTGRES_DB: myapp_dev
-      POSTGRES_USER: developer
-      POSTGRES_PASSWORD: devpass
-    volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-```
 
 ## Practical Example: Testing Time-Dependent Logic
 
